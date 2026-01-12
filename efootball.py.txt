@@ -1,0 +1,509 @@
+
+core_team1 = 0
+score_team2 = 0
+game_time = 90  # seconds
+start_time = pygame.time.get_ticks()
+possession = "Team 1"
+game_state = "PLAYING"  # PLAYING, PAUSED, GAME_OVER
+power_up_active = None
+power_up_timer = 0
+
+# Load sounds (placeholder - you can add actual sound files)
+try:
+    kick_sound = pygame.mixer.Sound("kick.wav")
+    goal_sound = pygame.mixer.Sound("goal.wav")
+    whistle_sound = pygame.mixer.Sound("whistle.wav")
+except:
+    # Create silent sounds if files not found
+    kick_sound = pygame.mixer.Sound(buffer=bytearray([]))
+    goal_sound = pygame.mixer.Sound(buffer=bytearray([]))
+    whistle_sound = pygame.mixer.Sound(buffer=bytearray([]))
+
+# Button positions and sizes
+BUTTON_SIZE = 50
+BUTTON_MARGIN = 20
+buttons = {
+    'shot': {'pos': (WIDTH - BUTTON_MARGIN - BUTTON_SIZE, HEIGHT - BUTTON_MARGIN - BUTTON_SIZE), 'color': RED, 'label': '□'},
+    'pass': {'pos': (WIDTH - BUTTON_MARGIN - BUTTON_SIZE*2 - 10, HEIGHT - BUTTON_MARGIN - BUTTON_SIZE), 'color': BLUE, 'label': 'X'},
+    'long_ball': {'pos': (WIDTH - BUTTON_MARGIN - BUTTON_SIZE*3 - 20, HEIGHT - BUTTON_MARGIN - BUTTON_SIZE), 'color': YELLOW, 'label': 'O'},
+    'through_pass': {'pos': (WIDTH - BUTTON_MARGIN - BUTTON_SIZE*4 - 30, HEIGHT - BUTTON_MARGIN - BUTTON_SIZE), 'color': GREEN, 'label': '△'}
+}
+
+# Power-up class
+class PowerUp:
+    def __init__(self, x, y, power_type):
+        self.x = x
+        self.y = y
+        self.radius = 15
+        self.power_type = power_type  # 'speed', 'power', 'freeze'
+        self.colors = {'speed': BLUE, 'power': RED, 'freeze': PURPLE}
+        self.active = True
+        self.spawn_time = pygame.time.get_ticks()
+        
+    def draw(self):
+        if self.active:
+            pygame.draw.circle(screen, self.colors[self.power_type], (int(self.x), int(self.y)), self.radius)
+            pygame.draw.circle(screen, WHITE, (int(self.x), int(self.y)), self.radius, 2)
+            
+            # Draw symbol
+            font = pygame.font.SysFont(None, 20)
+            if self.power_type == 'speed':
+                symbol = "⚡"
+            elif self.power_type == 'power':
+                symbol = "💪"
+            else:
+                symbol = "❄️"
+            
+            text = font.render(symbol, True, WHITE)
+            screen.blit(text, (self.x - 8, self.y - 8))
+    
+    def check_collision(self, player):
+        if not self.active:
+            return False
+            
+        distance = math.sqrt((player.x - self.x)**2 + (player.y - self.y)**2)
+        return distance < player.radius + self.radius
+
+# Player class with enhanced features
+class Player:
+    def __init__(self, x, y, color, team, number, role, is_user_controlled=False):
+        self.x = x
+        self.y = y
+        self.radius = 15
+        self.color = color
+        self.team = team
+        self.number = number
+        self.role = role  # 'defender', 'midfielder', 'attacker'
+        self.speed = self.get_base_speed()
+        self.is_user_controlled = is_user_controlled
+        self.selected = False
+        
+        # Player attributes based on role
+        self.kick_power = self.get_base_kick_power()
+        self.pass_power = 6
+        self.long_ball_power = 12
+        self.through_pass_power = 7
+        self.defense_skill = self.get_base_defense()
+        
+        # Stamina system
+        self.max_stamina = 100
+        self.stamina = self.max_stamina
+        self.stamina_drain = 0.1
+        self.stamina_regen = 0.05
+        
+        # Special abilities
+        self.speed_boost = 1.0
+        self.power_boost = 1.0
+        self.frozen = False
+        self.freeze_timer = 0
+        
+    def get_base_speed(self):
+        speeds = {'defender': 3.5, 'midfielder': 4.0, 'attacker': 4.5}
+        return speeds.get(self.role, 4.0)
+    
+    def get_base_kick_power(self):
+        powers = {'defender': 7, 'midfielder': 8, 'attacker': 9}
+        return powers.get(self.role, 8)
+    
+    def get_base_defense(self):
+        defense = {'defender': 8, 'midfielder': 6, 'attacker': 4}
+        return defense.get(self.role, 6)
+    
+    def update_stamina(self):
+        if self.is_user_controlled:
+            # Drain stamina when moving
+            keys = pygame.key.get_pressed()
+            if any([keys[pygame.K_w], keys[pygame.K_s], keys[pygame.K_a], keys[pygame.K_d]]):
+                self.stamina = max(0, self.stamina - self.stamina_drain)
+            else:
+                self.stamina = min(self.max_stamina, self.stamina + self.stamina_regen)
+    
+    def apply_power_up(self, power_type):
+        if power_type == 'speed':
+            self.speed_boost = 2.0
+        elif power_type == 'power':
+            self.power_boost = 2.0
+        elif power_type == 'freeze':
+            self.frozen = True
+            self.freeze_timer = 300  # 5 seconds at 60 FPS
+    
+    def update_power_ups(self):
+        # Update freeze timer
+        if self.frozen:
+            self.freeze_timer -= 1
+            if self.freeze_timer <= 0:
+                self.frozen = False
+        
+        # Gradually reduce boosts
+        if self.speed_boost > 1.0:
+            self.speed_boost = max(1.0, self.speed_boost - 0.001)
+        if self.power_boost > 1.0:
+            self.power_boost = max(1.0, self.power_boost - 0.001)
+    
+    def move_towards_ball(self, ball):
+        if not self.is_user_controlled and self.team == possession and not self.frozen:
+            dx = ball.x - self.x
+            dy = ball.y - self.y
+            distance = math.sqrt(dx**2 + dy**2)
+            
+            if distance > 0:
+                dx /= distance
+                dy /= distance
+                
+            current_speed = self.speed * self.speed_boost
+            self.x += dx * current_speed * 0.7
+            self.y += dy * current_speed * 0.7
+            
+            # Boundary check
+            self.x = max(self.radius, min(WIDTH - self.radius, self.x))
+            self.y = max(self.radius, min(HEIGHT - self.radius, self.y))
+    
+    def move(self, dx, dy):
+        if self.is_user_controlled and not self.frozen:
+            current_speed = self.speed * self.speed_boost
+            new_x = self.x + dx * current_speed
+            new_y = self.y + dy * current_speed
+            
+            # Boundary check
+            if self.radius <= new_x <= WIDTH - self.radius:
+                self.x = new_x
+            if self.radius <= new_y <= HEIGHT - self.radius:
+                self.y = new_y
+    
+    def kick(self, ball, power_multiplier=1.0):
+        dx = ball.x - self.x
+        dy = ball.y - self.y
+        distance = math.sqrt(dx**2 + dy**2)
+        
+        if distance < self.radius + ball.radius + 10:
+            if distance > 0:
+                dx /= distance
+                dy /= distance
+            
+            actual_power = self.kick_power * self.power_boost * power_multiplier
+            ball.vx = dx * actual_power
+            ball.vy = dy * actual_power
+            kick_sound.play()
+            return True
+        return False
+    
+    def pass_ball(self, ball, target_x, target_y):
+        dx = target_x - ball.x
+        dy = target_y - ball.y
+        distance = math.sqrt(dx**2 + dy**2)
+        
+        if distance > 0:
+            dx /= distance
+            dy /= distance
+        
+        actual_power = self.pass_power * self.power_boost
+        ball.vx = dx * actual_power
+        ball.vy = dy * actual_power
+        kick_sound.play()
+    
+    def draw(self):
+        # Draw player circle with stamina indicator
+        if self.frozen:
+            # Draw frozen effect
+            pygame.draw.circle(screen, LIGHT_BLUE, (int(self.x), int(self.y)), self.radius + 2)
+        
+        pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), self.radius)
+        
+        # Draw stamina ring
+        stamina_ratio = self.stamina / self.max_stamina
+        stamina_color = GREEN if stamina_ratio > 0.5 else YELLOW if stamina_ratio > 0.2 else RED
+        
+        # Draw player number
+        font = pygame.font.SysFont(None, 20)
+        number_text = font.render(str(self.number), True, WHITE)
+        screen.blit(number_text, (self.x - 5, self.y - 7))
+        
+        # Draw selection indicator
+        if self.selected:
+            pygame.draw.circle(screen, YELLOW, (int(self.x), int(self.y)), self.radius + 3, 2)
+            
+        # Draw role indicator
+        role_font = pygame.font.SysFont(None, 12)
+        role_text = role_font.render(self.role[0].upper(), True, WHITE)
+        screen.blit(role_text, (self.x - 3, self.y + 10))
+
+# Enhanced Ball class
+class Ball:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.radius = 8
+        self.vx = 0
+        self.vy = 0
+        self.friction = 0.96
+        self.grass_friction = 0.98
+        self.color = WHITE
+        self.trail = []
+        self.max_trail = 10
+        
+    def update(self):
+        # Add current position to trail
+        self.trail.append((self.x, self.y))
+        if len(self.trail) > self.max_trail:
+            self.trail.pop(0)
+        
+        # Apply friction
+        self.vx *= self.friction * self.grass_friction
+        self.vy *= self.friction * self.grass_friction
+        
+        # Stop if very slow
+        if abs(self.vx) < 0.1:
+            self.vx = 0
+        if abs(self.vy) < 0.1:
+            self.vy = 0
+            
+        # Update position
+        self.x += self.vx
+        self.y += self.vy
+        
+        # Boundary collision
+        if self.x - self.radius < 0:
+            self.x = self.radius
+            self.vx = -self.vx * 0.7
+        elif self.x + self.radius > WIDTH:
+            self.x = WIDTH - self.radius
+            self.vx = -self.vx * 0.7
+            
+        if self.y - self.radius < 0:
+            self.y = self.radius
+            self.vy = -self.vy * 0.7
+        elif self.y + self.radius > HEIGHT:
+            self.y = HEIGHT - self.radius
+            self.vy = -self.vy * 0.7
+            
+    def draw(self):
+        # Draw trail
+        for i, (trail_x, trail_y) in enumerate(self.trail):
+            alpha = i / len(self.trail) * 100
+            trail_color = (255, 255, 255, alpha)
+            pygame.draw.circle(screen, trail_color, (int(trail_x), int(trail_y)), 3)
+        
+        # Draw ball
+        pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), self.radius)
+        pygame.draw.circle(screen, BLACK, (int(self.x), int(self.y)), self.radius, 1)
+        
+        # Draw pattern
+        for i in range(5):
+            angle = i * 2 * math.pi / 5
+            px = self.x + (self.radius - 2) * math.cos(angle)
+            py = self.y + (self.radius - 2) * math.sin(angle)
+            pygame.draw.circle(screen, BLACK, (int(px), int(py)), 2)
+
+# Goal class
+class Goal:
+    def __init__(self, x, y, width, height, side):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.side = side
+        
+    def check_goal(self, ball):
+        if (self.side == "left" and 
+            ball.x - ball.radius < self.x + self.width and
+            ball.y > self.y and ball.y < self.y + self.height):
+            return True
+        elif (self.side == "right" and 
+              ball.x + ball.radius > self.x and
+              ball.y > self.y and ball.y < self.y + self.height):
+            return True
+        return False
+        
+    def draw(self):
+        pygame.draw.rect(screen, WHITE, (self.x, self.y, self.width, self.height), 3)
+        # Draw net
+        for i in range(1, 5):
+            pygame.draw.line(screen, WHITE, 
+                            (self.x, self.y + i * self.height/5),
+                            (self.x + self.width, self.y + i * self.height/5), 1)
+
+# Create game objects
+def create_teams():
+    team1_players = []
+    team2_players = []
+    
+    # Team 1 (Blue - user controlled)
+    formations = {
+        'defender': [(100, 150), (100, 300), (100, 450)],
+        'midfielder': [(300, 150), (300, 300), (300, 450)],
+        'attacker': [(500, 200), (500, 400)]
+    }
+    
+    number = 1
+    for role, positions in formations.items():
+        for pos in positions:
+            team1_players.append(Player(pos[0], pos[1], BLUE, "Team 1", number, role, number == 7))
+            number += 1
+    
+    # Team 2 (Red - AI)
+    formations = {
+        'defender': [(WIDTH-100, 150), (WIDTH-100, 300), (WIDTH-100, 450)],
+        'midfielder': [(WIDTH-300, 150), (WIDTH-300, 300), (WIDTH-300, 450)],
+        'attacker': [(WIDTH-500, 200), (WIDTH-500, 400)]
+    }
+    
+    number = 1
+    for role, positions in formations.items():
+        for pos in positions:
+            team2_players.append(Player(pos[0], pos[1], RED, "Team 2", number, role))
+            number += 1
+    
+    return team1_players, team2_players
+
+# Initialize game objects
+team1, team2 = create_teams()
+ball = Ball(WIDTH//2, HEIGHT//2)
+goal_left = Goal(0, HEIGHT//2 - 80, 20, 160, "left")
+goal_right = Goal(WIDTH - 20, HEIGHT//2 - 80, 20, 160, "right")
+
+# Power-up management
+power_ups = []
+last_power_up_time = pygame.time.get_ticks()
+POWER_UP_SPAWN_TIME = 10000  # 10 seconds
+
+def spawn_power_up():
+    x = random.randint(100, WIDTH - 100)
+    y = random.randint(100, HEIGHT - 100)
+    power_type = random.choice(['speed', 'power', 'freeze'])
+    power_ups.append(PowerUp(x, y, power_type))
+
+# Field drawing function
+def draw_field():
+    screen.fill(GREEN)
+    
+    # Draw grass pattern
+    for y in range(0, HEIGHT, 40):
+        for x in range(0, WIDTH, 40):
+            pygame.draw.rect(screen, DARK_GREEN, (x, y, 20, 20))
+    
+    # Field markings
+    pygame.draw.circle(screen, WHITE, (WIDTH//2, HEIGHT//2), 70, 2)
+    pygame.draw.line(screen, WHITE, (WIDTH//2, 0), (WIDTH//2, HEIGHT), 2)
+    pygame.draw.circle(screen, WHITE, (WIDTH//2, HEIGHT//2), 5)
+    
+    # Penalty areas
+    pygame.draw.rect(screen, WHITE, (0, HEIGHT//2 - 120, 120, 240), 2)
+    pygame.draw.rect(screen, WHITE, (WIDTH - 120, HEIGHT//2 - 120, 120, 240), 2)
+    
+    # Goal areas
+    pygame.draw.rect(screen, WHITE, (0, HEIGHT//2 - 40, 40, 80), 2)
+    pygame.draw.rect(screen, WHITE, (WIDTH - 40, HEIGHT//2 - 40, 40, 80), 2)
+
+# Draw control buttons
+def draw_buttons():
+    for button_name, button_info in buttons.items():
+        button_rect = pygame.Rect(button_info['pos'][0], button_info['pos'][1], BUTTON_SIZE, BUTTON_SIZE)
+        
+        pygame.draw.rect(screen, button_info['color'], button_rect)
+        pygame.draw.rect(screen, WHITE, button_rect, 3)
+        
+        font = pygame.font.SysFont(None, 30)
+        
+        if button_name == 'through_pass':
+            triangle_points = [
+                (button_rect.centerx, button_rect.top + 15),
+                (button_rect.left + 15, button_rect.bottom - 15),
+                (button_rect.right - 15, button_rect.bottom - 15)
+            ]
+            pygame.draw.polygon(screen, WHITE, triangle_points)
+        else:
+            label_text = font.render(button_info['label'], True, WHITE)
+            text_rect = label_text.get_rect(center=button_rect.center)
+            screen.blit(label_text, text_rect)
+
+# Find closest player
+def find_closest_player(players, ball):
+    closest_player = None
+    min_distance = float('inf')
+    
+    for player in players:
+        distance = math.sqrt((player.x - ball.x)**2 + (player.y - ball.y)**2)
+        if distance < min_distance:
+            min_distance = distance
+            closest_player = player
+    
+    return closest_player
+
+# Draw HUD
+def draw_hud():
+    font = pygame.font.SysFont(None, 36)
+    score_text = font.render(f"{score_team1} - {score_team2}", True, WHITE)
+    
+    elapsed_time = (pygame.time.get_ticks() - start_time) // 1000
+    remaining_time = max(0, game_time - elapsed_time)
+    time_text = font.render(f"Time: {remaining_time}", True, WHITE)
+    possession_text = font.render(f"Possession: {possession}", True, WHITE)
+    
+    screen.blit(score_text, (WIDTH//2 - 30, 20))
+    screen.blit(time_text, (WIDTH - 150, 20))
+    screen.blit(possession_text, (20, 20))
+    
+    # Draw controls instructions
+    controls_font = pygame.font.SysFont(None, 20)
+    instructions = [
+        "Movement: WASD or Arrow Keys",
+        "Switch Player: TAB",
+        "Shot: □ | Pass: X | Long Ball: O | Through: △",
+        "Pause: P | Quit: ESC"
+    ]
+    
+    for i, instruction in enumerate(instructions):
+        text = controls_font.render(instruction, True, WHITE)
+        screen.blit(text, (20, HEIGHT - 80 + i * 20))
+
+# Draw stamina bars
+def draw_stamina_bars():
+    user_player = next((p for p in team1 if p.is_user_controlled), None)
+    if user_player:
+        bar_width = 100
+        bar_height = 10
+        bar_x = 20
+        bar_y = 60
+        
+        # Background
+        pygame.draw.rect(screen, GRAY, (bar_x, bar_y, bar_width, bar_height))
+        
+        # Stamina fill
+        stamina_width = (user_player.stamina / user_player.max_stamina) * bar_width
+        stamina_color = GREEN if user_player.stamina > 50 else YELLOW if user_player.stamina > 20 else RED
+        pygame.draw.rect(screen, stamina_color, (bar_x, bar_y, stamina_width, bar_height))
+        
+        # Border
+        pygame.draw.rect(screen, WHITE, (bar_x, bar_y, bar_width, bar_height), 2)
+        
+        # Label
+        font = pygame.font.SysFont(None, 20)
+        stamina_text = font.render("Stamina", True, WHITE)
+        screen.blit(stamina_text, (bar_x, bar_y - 20))
+
+# Main game loop
+running = True
+while running:
+    # Handle events
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+            
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                running = False
+            elif event.key == pygame.K_p:
+                game_state = "PAUSED" if game_state == "PLAYING" else "PLAYING"
+            elif event.key == pygame.K_TAB and game_state == "PLAYING":
+                # Switch player
+                for player in team1:
+                    if player.is_user_controlled:
+                        player.is_user_controlled = False
+                        player.selected = False
+                current_idx = team1.index(next(p for p in team1 if p.selected)) if any(p.selected for p in team1) else -1
+                next_idx = (current_idx + 1) % len(team1)
+                team1[next_idx].is_user_controlled = True
+                team1[next_idx].selected = Tr
+
+
+
